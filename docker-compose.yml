@@ -61,7 +61,11 @@ services:
       - TS_AUTH_ONCE=true
       - TS_USERSPACE=false
       - TS_TAILSCALED_EXTRA_ARGS=--tun=tailscale0
-      - TS_EXTRA_ARGS=--login-server=https://${HEADSCALE_DOMAIN} --exit-node=infra-mullvad --exit-node-allow-lan-access=true
+      # --exit-node accepts an IP or a node name. At first `up` the node
+      # hasn't gotten its netmap yet, so it can't resolve names — use
+      # infra-mullvad's tailnet IP directly (pinned to 100.64.0.17 per
+      # homelab CLAUDE.md §1 and the cn-infra README).
+      - TS_EXTRA_ARGS=--login-server=https://${HEADSCALE_DOMAIN} --exit-node=100.64.0.17 --exit-node-allow-lan-access=true
       - SSL_CERT_DIR=/staging-certs
     entrypoint: ["/init.sh"]
     # All published ports live on the netns owner. 127.0.0.1 binding =
