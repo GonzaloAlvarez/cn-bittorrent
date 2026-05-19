@@ -126,6 +126,13 @@ if [ -f "$QBCONF" ]; then
   # subnets so X-Forwarded-For / X-Forwarded-Host are honored.
   qb_set ReverseProxySupportEnabled true
   qb_set TrustedReverseProxiesList  '172.16.0.0/12'
+  # Whitelist just the VPS tailnet IP for unauth access so Glance's
+  # monitor probe from home.lab.gn.al gets 200 instead of 401. qb has
+  # no unauth health endpoint and the tailnet ACL already gates
+  # tag:infra exclusively to the qb UI port, so this doesn't broaden
+  # the attack surface — only the VPS sees an unauth qb.
+  qb_set AuthSubnetWhitelistEnabled true
+  qb_set AuthSubnetWhitelist        '100.64.0.1/32'
   echo "      $QBCONF pinned"
 else
   echo "      qBittorrent.conf not yet present (first start will create it; re-run this script after)"
