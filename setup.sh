@@ -117,11 +117,15 @@ qb_set() {
 }
 
 if [ -f "$QBCONF" ]; then
-  qb_set HostHeaderValidation       true
-  # qb parses ServerDomains as SEMICOLON-separated (not comma; the
-  # qb source does s.split(';')). Comma is parsed as a single literal
-  # hostname and rejects everything.
-  qb_set ServerDomains              'torrent.kaiser.lan;torrent.lab.gn.al'
+  # qb v5 only stores ONE hostname in ServerDomains — even though its
+  # parser splits on ';', qb rewrites the config on startup keeping
+  # only the first entry. Since we need to serve TWO hostnames
+  # (torrent.kaiser.lan + torrent.lab.gn.al) and Traefik upstream
+  # already validates Host (cn-home for LAN, traefik-lab for tailnet),
+  # the cleanest fix is to disable qb's own host-header check.
+  # qb still gets the Host header for cookies/redirects via the
+  # reverse-proxy support below.
+  qb_set HostHeaderValidation       false
   # Traefik is the only thing fronting qb; trust the docker-bridge
   # subnets so X-Forwarded-For / X-Forwarded-Host are honored.
   qb_set ReverseProxySupportEnabled true
