@@ -102,21 +102,30 @@ for svc in sonarr radarr prowlarr lidarr readarr; do
   fi
 done
 
-# ─── 6. pin qbittorrent host-header validation ───────────────────────
-echo "[6/9] pinning qbittorrent ServerDomains"
+# ─── 6. pin qbittorrent reverse-proxy + host-header config ───────────
+echo "[6/9] pinning qbittorrent WebUI for Traefik (host validation + reverse proxy)"
 QBCONF="$REPO_DIR/qbittorrent/qBittorrent/qBittorrent.conf"
+
+# Helper: set "WebUI\Key=Value" in qBittorrent.conf, idempotent.
+qb_set() {
+  local key="$1" val="$2"
+  if grep -q "^WebUI\\\\${key}=" "$QBCONF"; then
+    sudo sed -i "s|^WebUI\\\\${key}=.*|WebUI\\\\${key}=${val}|" "$QBCONF"
+  else
+    echo "WebUI\\${key}=${val}" | sudo tee -a "$QBCONF" >/dev/null
+  fi
+}
+
 if [ -f "$QBCONF" ]; then
-  # idempotent: replace any existing line, append if missing
-  if grep -q '^WebUI\\HostHeaderValidation=' "$QBCONF"; then
-    sudo sed -i 's|^WebUI\\HostHeaderValidation=.*|WebUI\\HostHeaderValidation=true|' "$QBCONF"
-  else
-    echo 'WebUI\HostHeaderValidation=true' | sudo tee -a "$QBCONF" >/dev/null
-  fi
-  if grep -q '^WebUI\\ServerDomains=' "$QBCONF"; then
-    sudo sed -i 's|^WebUI\\ServerDomains=.*|WebUI\\ServerDomains=torrent.kaiser.lan,torrent.lab.gn.al|' "$QBCONF"
-  else
-    echo 'WebUI\ServerDomains=torrent.kaiser.lan,torrent.lab.gn.al' | sudo tee -a "$QBCONF" >/dev/null
-  fi
+  qb_set HostHeaderValidation       true
+  # qb parses ServerDomains as SEMICOLON-separated (not comma; the
+  # qb source does s.split(';')). Comma is parsed as a single literal
+  # hostname and rejects everything.
+  qb_set ServerDomains              'torrent.kaiser.lan;torrent.lab.gn.al'
+  # Traefik is the only thing fronting qb; trust the docker-bridge
+  # subnets so X-Forwarded-For / X-Forwarded-Host are honored.
+  qb_set ReverseProxySupportEnabled true
+  qb_set TrustedReverseProxiesList  '172.16.0.0/12'
   echo "      $QBCONF pinned"
 else
   echo "      qBittorrent.conf not yet present (first start will create it; re-run this script after)"
