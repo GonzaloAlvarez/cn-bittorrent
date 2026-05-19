@@ -50,6 +50,9 @@ services:
       - ts_state:/var/lib/tailscale
       - ./kill-switch/ts-torrent-init.sh:/init.sh:ro
       - ./certs/root_ca.crt:/staging-certs/root_ca.crt:ro
+      # so the kill-switch init can modprobe if a netfilter module
+      # isn't preloaded on the host (matches cn-infra/wg-mullvad)
+      - /lib/modules:/lib/modules:ro
     environment:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_AUTHKEY=${TORRENT_AUTHKEY}

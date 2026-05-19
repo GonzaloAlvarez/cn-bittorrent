@@ -22,18 +22,31 @@
 
 set -eu
 
-echo "[kill-switch] installing iptables OUTPUT default-deny"
-
-for cmd in iptables ip6tables; do
+install_rules() {
+  cmd=$1
   $cmd -P OUTPUT DROP
   $cmd -F OUTPUT
   $cmd -A OUTPUT -m mark --mark 0x80000/0xff0000 -j ACCEPT
   $cmd -A OUTPUT -o tailscale0 -j ACCEPT
   $cmd -A OUTPUT -o lo -j ACCEPT
   $cmd -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-done
+}
 
-echo "[kill-switch] rules:"
+echo "[kill-switch] installing iptables (v4) OUTPUT default-deny"
+install_rules iptables
+
+echo "[kill-switch] installing ip6tables OUTPUT default-deny (best effort)"
+if install_rules ip6tables 2>&1; then
+  echo "[kill-switch] ip6tables OK"
+else
+  # No IPv6 stack / nf6 module on this host — disable IPv6 in this
+  # netns instead, so apps can't try to use it and leak that way.
+  echo "[kill-switch] ip6tables unavailable; disabling IPv6 in this netns"
+  sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+  sysctl -w net.ipv6.conf.default.disable_ipv6=1 || true
+fi
+
+echo "[kill-switch] active rules:"
 iptables -L OUTPUT -nv --line-numbers
 echo "[kill-switch] handing off to tailscaled"
 
