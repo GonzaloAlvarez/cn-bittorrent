@@ -1,0 +1,15 @@
+.env
+*.log
+*.bak
+
+# Service config dirs (state — rsynced in from legacy, mounted as bind sources)
+/qbittorrent/
+/prowlarr/
+/sonarr/
+/radarr/
+/lidarr/
+/readarr/
+
+# step-ca root CA blob (copied by setup.sh)
+/certs/*.crt
+!/certs/.gitkeep

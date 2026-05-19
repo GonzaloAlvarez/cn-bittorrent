@@ -1,0 +1,312 @@
+# cn-bittorrent — torrent core (qb + *arr) on kaiser.lan, with all
+# public-internet egress forced through cn-infra's infra-mullvad exit
+# node. See repo README for the architecture overview and the homelab
+# orientation doc for the wider homelab map.
+#
+# Volume layout preserves the LEGACY bind paths so migrated *arr/qb
+# configs (rsync'd from ~/docker/docker-compose-nas) don't need
+# database surgery:
+#   /home/gonzalo/docker/data/nfs/torrent  →  /data/torrent   (*arr)
+#   /home/gonzalo/docker/data/nfs/torrent  →  /data/torrents  (qbittorrent)
+#
+# Operate via systemd, not `docker compose` directly:
+#   sudo systemctl {start,stop,restart} docker-compose@cn-bittorrent
+
+services:
+
+  # ─── 1. NFS prerequisite check ─────────────────────────────────────────
+  # Belt-and-suspenders verification *inside* the docker namespace, even
+  # though the systemd unit already gated startup on the host mount.
+  # Bails before any data service starts if the mount is gone.
+  mount-precheck:
+    image: alpine:3.20
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mountpoint -q /nfs-check || { echo "FAIL: NFS not mounted at /home/gonzalo/docker/data/nfs"; exit 1; }
+        test -d /nfs-check/torrent || { echo "FAIL: torrent subtree missing on NFS"; exit 1; }
+        echo "NFS OK ($(df -h /nfs-check | tail -1 | awk '{print $4}') free)"
+    volumes:
+      - /home/gonzalo/docker/data/nfs:/nfs-check:ro
+    restart: "no"
+
+  # ─── 2. ts-torrent — netns owner & egress controller ──────────────────
+  # Owns the network namespace that every torrent-related container
+  # shares. iptables kill-switch (kill-switch/ts-torrent-init.sh) is
+  # installed BEFORE tailscaled starts, so the startup-race leak window
+  # is sealed. --exit-node=infra-mullvad forces all public-internet
+  # egress through cn-infra's Mullvad tunnel.
+  ts-torrent:
+    image: tailscale/tailscale:latest
+    hostname: ts-torrent
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ts_state:/var/lib/tailscale
+      - ./kill-switch/ts-torrent-init.sh:/init.sh:ro
+      - ./certs/root_ca.crt:/staging-certs/root_ca.crt:ro
+    environment:
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTHKEY=${TORRENT_AUTHKEY}
+      - TS_HOSTNAME=torrent
+      - TS_ACCEPT_DNS=true
+      - TS_AUTH_ONCE=true
+      - TS_USERSPACE=false
+      - TS_TAILSCALED_EXTRA_ARGS=--tun=tailscale0
+      - TS_EXTRA_ARGS=--login-server=https://${HEADSCALE_DOMAIN} --exit-node=infra-mullvad --exit-node-allow-lan-access=true
+      - SSL_CERT_DIR=/staging-certs
+    entrypoint: ["/init.sh"]
+    # All published ports live on the netns owner. 127.0.0.1 binding =
+    # LAN-only via cn-home's Traefik on kaiser; no WAN exposure.
+    ports:
+      - "127.0.0.1:8080:8080"   # qbittorrent UI  → torrent.kaiser.lan
+      - "127.0.0.1:8989:8989"   # sonarr           → sonarr.kaiser.lan
+      - "127.0.0.1:7878:7878"   # radarr           → radarr.kaiser.lan
+      - "127.0.0.1:9696:9696"   # prowlarr         → prowlarr.kaiser.lan
+      - "127.0.0.1:8686:8686"   # lidarr           → lidarr.kaiser.lan
+      - "127.0.0.1:8787:8787"   # readarr          → readarr.kaiser.lan
+    depends_on:
+      mount-precheck:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale ip --4 >/dev/null 2>&1"]
+      interval: 10s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # ─── 3. Torrent core — all share ts-torrent's netns ───────────────────
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:libtorrentv1
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+      - WEBUI_PORT=8080
+    volumes:
+      - ./qbittorrent:/config
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrents
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ./prowlarr:/config
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ./sonarr:/config
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ./radarr:/config
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ./lidarr:/config
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:develop
+    network_mode: "service:ts-torrent"
+    environment:
+      - PUID=${USER_ID}
+      - PGID=${GROUP_ID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - ./readarr:/config
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── 4. Tailnet self-registration with VPS Consul ──────────────────────
+  # Six Traefik routers — one per service, each on its own subdomain.
+  # qbittorrent uses `torrent.<LAB_DOMAIN>` (per user naming choice);
+  # the *arr suite uses `<service>.<LAB_DOMAIN>`.
+  consul-register:
+    image: curlimages/curl:8.8.0
+    network_mode: "service:ts-torrent"
+    environment:
+      - CONSUL_ADDR=http://${INFRA_VPS_TAILNET_IP}:8500
+      - TAILNET_HOST=torrent.${TAILNET_DOMAIN}
+      - LAB_DOMAIN=${LAB_DOMAIN}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        register() {
+          NAME=$$1; PORT=$$2; SUB=$$3
+          RULE="Host(\`$$SUB.$$LAB_DOMAIN\`)"
+          PAYLOAD=$$(cat <<JSON
+        {
+          "Name": "$$NAME",
+          "ID": "$$NAME-torrent",
+          "Address": "$$TAILNET_HOST",
+          "Port": $$PORT,
+          "Tags": [
+            "traefik.enable=true",
+            "traefik.http.routers.$$NAME.rule=$$RULE",
+            "traefik.http.routers.$$NAME.entrypoints=websecure",
+            "traefik.http.routers.$$NAME.tls=true",
+            "traefik.http.routers.$$NAME.tls.certresolver=dns"
+          ],
+          "Check": {
+            "TCP": "$$TAILNET_HOST:$$PORT",
+            "Interval": "10s",
+            "DeregisterCriticalServiceAfter": "2m"
+          }
+        }
+        JSON
+          )
+          if curl -sf -X PUT "$$CONSUL_ADDR/v1/agent/service/register" \
+               -H "Content-Type: application/json" -d "$$PAYLOAD" >/dev/null; then
+            echo "registered $$NAME ($$SUB.$$LAB_DOMAIN -> :$$PORT)"
+          else
+            echo "FAILED to register $$NAME" >&2
+          fi
+        }
+        while true; do
+          register qbittorrent 8080 torrent
+          register sonarr      8989 sonarr
+          register radarr      7878 radarr
+          register prowlarr    9696 prowlarr
+          register lidarr      8686 lidarr
+          register readarr     8787 readarr
+          sleep 60
+        done
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── 5. Observability ─────────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:3.4.2
+    network_mode: "service:ts-torrent"
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./tailnet/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - INFRA_VPS_TAILNET_IP=${INFRA_VPS_TAILNET_IP}
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    network_mode: "service:ts-torrent"
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── 6. Watchdog + watchtower ─────────────────────────────────────────
+  # ts-torrent restarts (image bump / netns reset / crash) leave its
+  # dependents attached to the orphaned old netns. The watchdog notices
+  # the StartedAt timestamp change and force-recreates everyone.
+  ts-torrent-watchdog:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}                       # CLAUDE.md §15 — keep working dirs aligned
+    working_dir: ${PWD}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache docker-cli-compose >/dev/null
+        echo "[watchdog] ready, polling ts-torrent every 10s"
+        LAST=""
+        while true; do
+          CUR=$$(docker inspect cn-bittorrent-ts-torrent-1 --format "{{.State.StartedAt}}" 2>/dev/null || true)
+          if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
+            echo "[watchdog] ts-torrent restarted (was $$LAST, now $$CUR), recreating dependents"
+            docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
+              qbittorrent prowlarr sonarr radarr lidarr readarr \
+              consul-register promtail node-exporter \
+              && echo "[watchdog] OK" \
+              || echo "[watchdog] FAILED"
+          fi
+          LAST="$$CUR"
+          sleep 10
+        done
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    command:
+      - "--cleanup"
+      - "--schedule=0 0 3 * * *"
+      - "--notification-url=smtp://${SMTP_USERNAME}:${SMTP_PASSWORD}@${SMTP_HOST}:${SMTP_PORT}/?from=${SMTP_FROM}&to=${ALERT_EMAIL}&starttls=yes"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_API_VERSION=1.45
+    restart: unless-stopped
+
+volumes:
+  ts_state:
