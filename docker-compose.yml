@@ -313,7 +313,7 @@ services:
     restart: unless-stopped
 
   qbittorrent-exporter:
-    image: ghcr.io/esanchezm/prometheus-qbittorrent-exporter:1.6.0
+    image: esanchezm/prometheus-qbittorrent-exporter:latest
     network_mode: "service:ts-torrent"
     environment:
       - QBITTORRENT_HOST=127.0.0.1
