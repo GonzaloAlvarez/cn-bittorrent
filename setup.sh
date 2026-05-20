@@ -137,8 +137,13 @@ if [ -f "$QBCONF" ]; then
   # the attack surface — only the VPS sees an unauth qb.
   qb_set AuthSubnetWhitelistEnabled true
   # 100.64.0.1/32 = VPS infra-vps for Glance monitor probe.
-  # 127.0.0.1/32 = qbittorrent-exporter sidecar in the same netns.
-  qb_set AuthSubnetWhitelist        '100.64.0.1/32,127.0.0.1/32'
+  qb_set AuthSubnetWhitelist        '100.64.0.1/32'
+  # Bypass auth for 127.0.0.1 so the qbittorrent-exporter sidecar
+  # (running in the same netns) can read /api/v2/* without credentials.
+  # qb's LocalHostAuth=false is the documented localhost-bypass flag —
+  # AuthSubnetWhitelist treats 127.0.0.1 separately and doesn't actually
+  # cover it.
+  qb_set LocalHostAuth              false
   echo "      $QBCONF pinned"
 else
   echo "      qBittorrent.conf not yet present (first start will create it; re-run this script after)"
