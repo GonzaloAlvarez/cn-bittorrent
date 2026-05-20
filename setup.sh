@@ -136,11 +136,45 @@ if [ -f "$QBCONF" ]; then
   # tag:infra exclusively to the qb UI port, so this doesn't broaden
   # the attack surface — only the VPS sees an unauth qb.
   qb_set AuthSubnetWhitelistEnabled true
-  qb_set AuthSubnetWhitelist        '100.64.0.1/32'
+  # 100.64.0.1/32 = VPS infra-vps for Glance monitor probe.
+  # 127.0.0.1/32 = qbittorrent-exporter sidecar in the same netns.
+  qb_set AuthSubnetWhitelist        '100.64.0.1/32,127.0.0.1/32'
   echo "      $QBCONF pinned"
 else
   echo "      qBittorrent.conf not yet present (first start will create it; re-run this script after)"
 fi
+
+# ─── 6b. extract *arr API keys for exportarr ─────────────────────────
+# Each *arr writes its API key into config.xml under <ApiKey>. exportarr
+# needs them as env vars. Read them and write to .env idempotently —
+# user never has to touch these manually. .env is gitignored.
+echo "[6b/9] extracting *arr API keys into .env"
+ENV_FILE="$REPO_DIR/.env"
+extract_apikey() {
+  local svc="$1" envvar="$2"
+  local cfg="$REPO_DIR/$svc/config.xml"
+  if [ -f "$cfg" ]; then
+    local key
+    key=$(grep -oE '<ApiKey>[a-f0-9]{32}</ApiKey>' "$cfg" | sed 's/<[^>]*>//g' | head -1)
+    if [ -n "$key" ]; then
+      if grep -q "^${envvar}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${envvar}=.*|${envvar}=${key}|" "$ENV_FILE"
+      else
+        echo "${envvar}=${key}" >> "$ENV_FILE"
+      fi
+      echo "      ${svc}: ${envvar} set"
+    else
+      echo "      ${svc}: no ApiKey in config.xml (service hasn't fully booted yet?)"
+    fi
+  else
+    echo "      ${svc}: config.xml missing"
+  fi
+}
+extract_apikey sonarr   SONARR_API_KEY
+extract_apikey radarr   RADARR_API_KEY
+extract_apikey prowlarr PROWLARR_API_KEY
+extract_apikey lidarr   LIDARR_API_KEY
+extract_apikey readarr  READARR_API_KEY
 
 # ─── 7. install systemd unit ─────────────────────────────────────────
 UNIT_SRC="$REPO_DIR/systemd/docker-compose@cn-bittorrent.service"

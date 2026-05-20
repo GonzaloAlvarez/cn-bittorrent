@@ -239,6 +239,96 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ─── 4b. App-level exporters ───────────────────────────────────────────
+  # All exporters share ts-torrent's netns. They reach their target
+  # service via 127.0.0.1:<port> inside that netns, and themselves listen
+  # on a port that VPS Prometheus scrapes at torrent.ts.gn.al:<port>.
+  # API keys are extracted from each *arr's config.xml by setup.sh and
+  # written to .env. qbittorrent-exporter uses anonymous access via the
+  # localhost whitelist (setup.sh extends AuthSubnetWhitelist to include
+  # 127.0.0.1/32 alongside 100.64.0.1/32).
+  sonarr-exporter:
+    image: ghcr.io/onedr0p/exportarr:v2.0.1
+    network_mode: "service:ts-torrent"
+    command: ["sonarr"]
+    environment:
+      - PORT=9707
+      - URL=http://127.0.0.1:8989
+      - APIKEY=${SONARR_API_KEY}
+    depends_on:
+      sonarr:
+        condition: service_started
+    restart: unless-stopped
+
+  radarr-exporter:
+    image: ghcr.io/onedr0p/exportarr:v2.0.1
+    network_mode: "service:ts-torrent"
+    command: ["radarr"]
+    environment:
+      - PORT=9708
+      - URL=http://127.0.0.1:7878
+      - APIKEY=${RADARR_API_KEY}
+    depends_on:
+      radarr:
+        condition: service_started
+    restart: unless-stopped
+
+  prowlarr-exporter:
+    image: ghcr.io/onedr0p/exportarr:v2.0.1
+    network_mode: "service:ts-torrent"
+    command: ["prowlarr"]
+    environment:
+      - PORT=9709
+      - URL=http://127.0.0.1:9696
+      - APIKEY=${PROWLARR_API_KEY}
+    depends_on:
+      prowlarr:
+        condition: service_started
+    restart: unless-stopped
+
+  lidarr-exporter:
+    image: ghcr.io/onedr0p/exportarr:v2.0.1
+    network_mode: "service:ts-torrent"
+    command: ["lidarr"]
+    environment:
+      - PORT=9710
+      - URL=http://127.0.0.1:8686
+      - APIKEY=${LIDARR_API_KEY}
+    depends_on:
+      lidarr:
+        condition: service_started
+    restart: unless-stopped
+
+  readarr-exporter:
+    image: ghcr.io/onedr0p/exportarr:v2.0.1
+    network_mode: "service:ts-torrent"
+    command: ["readarr"]
+    environment:
+      - PORT=9711
+      - URL=http://127.0.0.1:8787
+      - APIKEY=${READARR_API_KEY}
+    depends_on:
+      readarr:
+        condition: service_started
+    restart: unless-stopped
+
+  qbittorrent-exporter:
+    image: ghcr.io/esanchezm/prometheus-qbittorrent-exporter:1.6.0
+    network_mode: "service:ts-torrent"
+    environment:
+      - QBITTORRENT_HOST=127.0.0.1
+      - QBITTORRENT_PORT=8080
+      - EXPORTER_PORT=9712
+      - METRICS_PREFIX=qbittorrent
+      # Anonymous access: qb whitelists 127.0.0.1/32 (setup.sh extends
+      # WebUI\AuthSubnetWhitelist for this).
+      - QBITTORRENT_USER=
+      - QBITTORRENT_PASS=
+    depends_on:
+      qbittorrent:
+        condition: service_started
+    restart: unless-stopped
+
   # ─── 5. Observability ─────────────────────────────────────────────────
   promtail:
     image: grafana/promtail:3.4.2
@@ -295,6 +385,8 @@ services:
             echo "[watchdog] ts-torrent restarted (was $$LAST, now $$CUR), recreating dependents"
             docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
               qbittorrent prowlarr sonarr radarr lidarr readarr \
+              sonarr-exporter radarr-exporter prowlarr-exporter \
+              lidarr-exporter readarr-exporter qbittorrent-exporter \
               consul-register promtail node-exporter \
               && echo "[watchdog] OK" \
               || echo "[watchdog] FAILED"
