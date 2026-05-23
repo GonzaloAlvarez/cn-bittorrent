@@ -118,6 +118,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # FlareSolverr — headless-browser proxy that solves CloudFlare's JS
+  # challenges for indexers like Torrentio that are fronted by CF
+  # bot-protection. Listens on :8191 inside ts-torrent's netns; Prowlarr
+  # reaches it at 127.0.0.1:8191 and routes selected indexers through it
+  # via the "Indexer Proxies" config (attached by tag). All outbound
+  # traffic egresses through the same Mullvad exit as the rest of the
+  # stack (cn-bittorrent kill-switch is in effect).
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    network_mode: "service:ts-torrent"
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TIMEZONE}
+      - CAPTCHA_SOLVER=none
+    depends_on:
+      ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
     network_mode: "service:ts-torrent"
@@ -384,7 +403,7 @@ services:
           if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
             echo "[watchdog] ts-torrent restarted (was $$LAST, now $$CUR), recreating dependents"
             docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
-              qbittorrent prowlarr sonarr radarr lidarr readarr \
+              qbittorrent prowlarr sonarr radarr lidarr readarr flaresolverr \
               sonarr-exporter radarr-exporter prowlarr-exporter \
               lidarr-exporter readarr-exporter qbittorrent-exporter \
               consul-register promtail node-exporter \
