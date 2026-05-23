@@ -70,13 +70,11 @@ services:
     entrypoint: ["/init.sh"]
     # All published ports live on the netns owner. 127.0.0.1 binding =
     # LAN-only via cn-home's Traefik on kaiser; no WAN exposure.
+    # Only qbittorrent stays in ts-torrent's netns now — the *arr suite
+    # moved to ts-arr (no Mullvad, real WAN egress) so indexer queries
+    # don't get IP-banned by CloudFlare. See ts-arr below.
     ports:
       - "127.0.0.1:8080:8080"   # qbittorrent UI  → torrent.kaiser.lan
-      - "127.0.0.1:8989:8989"   # sonarr           → sonarr.kaiser.lan
-      - "127.0.0.1:7878:7878"   # radarr           → radarr.kaiser.lan
-      - "127.0.0.1:9696:9696"   # prowlarr         → prowlarr.kaiser.lan
-      - "127.0.0.1:8686:8686"   # lidarr           → lidarr.kaiser.lan
-      - "127.0.0.1:8787:8787"   # readarr          → readarr.kaiser.lan
     depends_on:
       mount-precheck:
         condition: service_completed_successfully
@@ -87,7 +85,54 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # ─── 3. Torrent core — all share ts-torrent's netns ───────────────────
+  # ─── 2b. Second Tailscale sidecar for the *arr suite ───────────────────
+  # Same shape as ts-torrent BUT no --exit-node and no kill-switch — egress
+  # is via kaiser's WAN (clear-IP) for everything except tailnet traffic.
+  # Hosts Prowlarr/Sonarr/Radarr/Lidarr/Readarr/flaresolverr + their
+  # exporters. Tailnet identity: `arr.ts.gn.al`, tag:svc.
+  #
+  # Privacy trade: indexer endpoints and metadata APIs (TheTVDB, TMDB,
+  # 1337x, strem.fun, etc.) now see kaiser's residential WAN IP. The
+  # actual torrent traffic stays Mullvad-quarantined in ts-torrent.
+  ts-arr:
+    image: tailscale/tailscale:latest
+    hostname: ts-arr
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ts_arr_state:/var/lib/tailscale
+      - ./certs/root_ca.crt:/staging-certs/root_ca.crt:ro
+      - /lib/modules:/lib/modules:ro
+    environment:
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTHKEY=${ARR_AUTHKEY}
+      - TS_HOSTNAME=arr
+      - TS_ACCEPT_DNS=true
+      - TS_AUTH_ONCE=true
+      - TS_USERSPACE=false
+      - TS_TAILSCALED_EXTRA_ARGS=--tun=tailscale0
+      - TS_EXTRA_ARGS=--login-server=https://${HEADSCALE_DOMAIN}
+      - SSL_CERT_DIR=/staging-certs
+    ports:
+      - "127.0.0.1:8989:8989"   # sonarr    → sonarr.kaiser.lan
+      - "127.0.0.1:7878:7878"   # radarr    → radarr.kaiser.lan
+      - "127.0.0.1:9696:9696"   # prowlarr  → prowlarr.kaiser.lan
+      - "127.0.0.1:8686:8686"   # lidarr    → lidarr.kaiser.lan
+      - "127.0.0.1:8787:8787"   # readarr   → readarr.kaiser.lan
+    depends_on:
+      mount-precheck:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale ip --4 >/dev/null 2>&1"]
+      interval: 10s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # ─── 3. Torrent core — qbittorrent (Mullvad-egress via ts-torrent) ────
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:libtorrentv1
     network_mode: "service:ts-torrent"
@@ -104,9 +149,10 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ─── 3b. *arr suite — share ts-arr's netns (WAN egress) ────────────────
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:latest
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -114,32 +160,32 @@ services:
     volumes:
       - ./prowlarr:/config
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   # FlareSolverr — headless-browser proxy that solves CloudFlare's JS
-  # challenges for indexers like Torrentio that are fronted by CF
-  # bot-protection. Listens on :8191 inside ts-torrent's netns; Prowlarr
-  # reaches it at 127.0.0.1:8191 and routes selected indexers through it
-  # via the "Indexer Proxies" config (attached by tag). All outbound
-  # traffic egresses through the same Mullvad exit as the rest of the
-  # stack (cn-bittorrent kill-switch is in effect).
+  # challenges for indexers fronted by CF bot-protection. Listens on
+  # :8191 inside ts-arr's netns; Prowlarr reaches it at 127.0.0.1:8191
+  # and routes selected indexers through it via "Indexer Proxies"
+  # (attached by tag). Now egresses via kaiser's WAN like the rest of
+  # the *arr suite — so it sees the residential IP, which has much
+  # better CF reputation than the Mullvad exit it used to share.
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - LOG_LEVEL=info
       - TZ=${TIMEZONE}
       - CAPTCHA_SOLVER=none
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   sonarr:
     image: lscr.io/linuxserver/sonarr:latest
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -148,13 +194,13 @@ services:
       - ./sonarr:/config
       - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   radarr:
     image: lscr.io/linuxserver/radarr:latest
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -163,13 +209,13 @@ services:
       - ./radarr:/config
       - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   lidarr:
     image: lscr.io/linuxserver/lidarr:latest
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -178,13 +224,13 @@ services:
       - ./lidarr:/config
       - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   readarr:
     image: lscr.io/linuxserver/readarr:develop
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     environment:
       - PUID=${USER_ID}
       - PGID=${GROUP_ID}
@@ -193,14 +239,16 @@ services:
       - ./readarr:/config
       - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
     depends_on:
-      ts-torrent:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
   # ─── 4. Tailnet self-registration with VPS Consul ──────────────────────
-  # Six Traefik routers — one per service, each on its own subdomain.
-  # qbittorrent uses `torrent.<LAB_DOMAIN>` (per user naming choice);
-  # the *arr suite uses `<service>.<LAB_DOMAIN>`.
+  # Two loops, one per netns:
+  #   * consul-register        → qbittorrent only (lives in ts-torrent's
+  #     netns — TAILNET_HOST=torrent.ts.gn.al, Mullvad-egress).
+  #   * consul-register-arr    → 5 *arr services (lives in ts-arr's
+  #     netns — TAILNET_HOST=arr.ts.gn.al, WAN-egress).
   consul-register:
     image: curlimages/curl:8.8.0
     network_mode: "service:ts-torrent"
@@ -246,15 +294,66 @@ services:
         }
         while true; do
           register qbittorrent 8080 torrent
-          register sonarr      8989 sonarr
-          register radarr      7878 radarr
-          register prowlarr    9696 prowlarr
-          register lidarr      8686 lidarr
-          register readarr     8787 readarr
           sleep 60
         done
     depends_on:
       ts-torrent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  consul-register-arr:
+    image: curlimages/curl:8.8.0
+    network_mode: "service:ts-arr"
+    environment:
+      - CONSUL_ADDR=http://${INFRA_VPS_TAILNET_IP}:8500
+      - TAILNET_HOST=arr.${TAILNET_DOMAIN}
+      - LAB_DOMAIN=${LAB_DOMAIN}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        register() {
+          NAME=$$1; PORT=$$2; SUB=$$3
+          RULE="Host(\`$$SUB.$$LAB_DOMAIN\`)"
+          PAYLOAD=$$(cat <<JSON
+        {
+          "Name": "$$NAME",
+          "ID": "$$NAME-torrent",
+          "Address": "$$TAILNET_HOST",
+          "Port": $$PORT,
+          "Tags": [
+            "traefik.enable=true",
+            "traefik.http.routers.$$NAME.rule=$$RULE",
+            "traefik.http.routers.$$NAME.entrypoints=websecure",
+            "traefik.http.routers.$$NAME.tls=true",
+            "traefik.http.routers.$$NAME.tls.certresolver=dns"
+          ],
+          "Check": {
+            "TCP": "$$TAILNET_HOST:$$PORT",
+            "Interval": "10s",
+            "DeregisterCriticalServiceAfter": "2m"
+          }
+        }
+        JSON
+          )
+          if curl -sf -X PUT "$$CONSUL_ADDR/v1/agent/service/register" \
+               -H "Content-Type: application/json" -d "$$PAYLOAD" >/dev/null; then
+            echo "registered $$NAME ($$SUB.$$LAB_DOMAIN -> :$$PORT)"
+          else
+            echo "FAILED to register $$NAME" >&2
+          fi
+        }
+        while true; do
+          register sonarr   8989 sonarr
+          register radarr   7878 radarr
+          register prowlarr 9696 prowlarr
+          register lidarr   8686 lidarr
+          register readarr  8787 readarr
+          sleep 60
+        done
+    depends_on:
+      ts-arr:
         condition: service_healthy
     restart: unless-stopped
 
@@ -268,7 +367,7 @@ services:
   # 127.0.0.1/32 alongside 100.64.0.1/32).
   sonarr-exporter:
     image: ghcr.io/onedr0p/exportarr:v2.0.1
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     command: ["sonarr"]
     environment:
       - PORT=9707
@@ -281,7 +380,7 @@ services:
 
   radarr-exporter:
     image: ghcr.io/onedr0p/exportarr:v2.0.1
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     command: ["radarr"]
     environment:
       - PORT=9708
@@ -294,7 +393,7 @@ services:
 
   prowlarr-exporter:
     image: ghcr.io/onedr0p/exportarr:v2.0.1
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     command: ["prowlarr"]
     environment:
       - PORT=9709
@@ -307,7 +406,7 @@ services:
 
   lidarr-exporter:
     image: ghcr.io/onedr0p/exportarr:v2.0.1
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     command: ["lidarr"]
     environment:
       - PORT=9710
@@ -320,7 +419,7 @@ services:
 
   readarr-exporter:
     image: ghcr.io/onedr0p/exportarr:v2.0.1
-    network_mode: "service:ts-torrent"
+    network_mode: "service:ts-arr"
     command: ["readarr"]
     environment:
       - PORT=9711
@@ -403,10 +502,39 @@ services:
           if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
             echo "[watchdog] ts-torrent restarted (was $$LAST, now $$CUR), recreating dependents"
             docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
-              qbittorrent prowlarr sonarr radarr lidarr readarr flaresolverr \
-              sonarr-exporter radarr-exporter prowlarr-exporter \
-              lidarr-exporter readarr-exporter qbittorrent-exporter \
+              qbittorrent qbittorrent-exporter \
               consul-register promtail node-exporter \
+              && echo "[watchdog] OK" \
+              || echo "[watchdog] FAILED"
+          fi
+          LAST="$$CUR"
+          sleep 10
+        done
+    restart: unless-stopped
+
+  # Same drift-detector pattern for the *arr-side sidecar.
+  ts-arr-watchdog:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}
+    working_dir: ${PWD}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache docker-cli-compose >/dev/null
+        echo "[watchdog] ready, polling ts-arr every 10s"
+        LAST=""
+        while true; do
+          CUR=$$(docker inspect cn-bittorrent-ts-arr-1 --format "{{.State.StartedAt}}" 2>/dev/null || true)
+          if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
+            echo "[watchdog] ts-arr restarted (was $$LAST, now $$CUR), recreating dependents"
+            docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
+              prowlarr sonarr radarr lidarr readarr flaresolverr \
+              sonarr-exporter radarr-exporter prowlarr-exporter \
+              lidarr-exporter readarr-exporter \
+              consul-register-arr \
               && echo "[watchdog] OK" \
               || echo "[watchdog] FAILED"
           fi
@@ -431,3 +559,4 @@ services:
 
 volumes:
   ts_state:
+  ts_arr_state:
