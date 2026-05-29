@@ -481,9 +481,15 @@ services:
     restart: unless-stopped
 
   # ─── 6. Watchdog + watchtower ─────────────────────────────────────────
-  # ts-torrent restarts (image bump / netns reset / crash) leave its
-  # dependents attached to the orphaned old netns. The watchdog notices
-  # the StartedAt timestamp change and force-recreates everyone.
+  # Sidecar restarts (image bump / netns reset / crash) leave dependents
+  # attached to the orphaned old netns. Each watchdog inspects each
+  # dependent's HostConfig.NetworkMode ("container:<id>") against the
+  # current sidecar container Id; mismatch -> netns drift -> recreate.
+  # A second mode catches dependents in `created` Status (compose-up
+  # name-conflict races during force-recreate can leave containers
+  # created-but-never-started; restart:unless-stopped does NOT activate
+  # in that state) -> just start them. Both modes are idempotent and
+  # self-heal on the watchdog's own first poll after restart.
   ts-torrent-watchdog:
     image: docker:cli
     volumes:
@@ -495,24 +501,40 @@ services:
       - -c
       - |
         apk add --no-cache docker-cli-compose >/dev/null
-        echo "[watchdog] ready, polling ts-torrent every 10s"
-        LAST=""
+        DEPS="qbittorrent qbittorrent-exporter consul-register promtail node-exporter"
+        echo "[watchdog] ready, polling dependents every 10s ($$DEPS)"
         while true; do
-          CUR=$$(docker inspect cn-bittorrent-ts-torrent-1 --format "{{.State.StartedAt}}" 2>/dev/null || true)
-          if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
-            echo "[watchdog] ts-torrent restarted (was $$LAST, now $$CUR), recreating dependents"
-            docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
-              qbittorrent qbittorrent-exporter \
-              consul-register promtail node-exporter \
-              && echo "[watchdog] OK" \
-              || echo "[watchdog] FAILED"
+          TS_ID=$$(docker inspect cn-bittorrent-ts-torrent-1 --format "{{.Id}}" 2>/dev/null || true)
+          if [ -n "$$TS_ID" ]; then
+            NEED_RECREATE=""
+            NEED_START=""
+            for dep in $$DEPS; do
+              INFO=$$(docker inspect cn-bittorrent-$$dep-1 --format "{{.HostConfig.NetworkMode}} {{.State.Status}}" 2>/dev/null || true)
+              [ -n "$$INFO" ] || continue
+              DEP_NM=$$(echo "$$INFO" | awk "{print \$$1}")
+              DEP_STATUS=$$(echo "$$INFO" | awk "{print \$$2}")
+              DEP_TARGET=$${DEP_NM#container:}
+              if [ "$$DEP_TARGET" != "$$TS_ID" ]; then
+                NEED_RECREATE="$$NEED_RECREATE $$dep"
+              elif [ "$$DEP_STATUS" != "running" ]; then
+                NEED_START="$$NEED_START $$dep"
+              fi
+            done
+            if [ -n "$$NEED_RECREATE" ]; then
+              echo "[watchdog] netns drift on:$$NEED_RECREATE -- recreating"
+              docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
+                && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
+            fi
+            if [ -n "$$NEED_START" ]; then
+              echo "[watchdog] stopped on:$$NEED_START -- starting"
+              docker compose -p cn-bittorrent start $$NEED_START \
+                && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+            fi
           fi
-          LAST="$$CUR"
           sleep 10
         done
     restart: unless-stopped
 
-  # Same drift-detector pattern for the *arr-side sidecar.
   ts-arr-watchdog:
     image: docker:cli
     volumes:
@@ -524,21 +546,36 @@ services:
       - -c
       - |
         apk add --no-cache docker-cli-compose >/dev/null
-        echo "[watchdog] ready, polling ts-arr every 10s"
-        LAST=""
+        DEPS="prowlarr sonarr radarr lidarr readarr flaresolverr sonarr-exporter radarr-exporter prowlarr-exporter lidarr-exporter readarr-exporter consul-register-arr"
+        echo "[watchdog] ready, polling dependents every 10s ($$DEPS)"
         while true; do
-          CUR=$$(docker inspect cn-bittorrent-ts-arr-1 --format "{{.State.StartedAt}}" 2>/dev/null || true)
-          if [ -n "$$CUR" ] && [ -n "$$LAST" ] && [ "$$CUR" != "$$LAST" ]; then
-            echo "[watchdog] ts-arr restarted (was $$LAST, now $$CUR), recreating dependents"
-            docker compose -p cn-bittorrent up -d --force-recreate --no-deps \
-              prowlarr sonarr radarr lidarr readarr flaresolverr \
-              sonarr-exporter radarr-exporter prowlarr-exporter \
-              lidarr-exporter readarr-exporter \
-              consul-register-arr \
-              && echo "[watchdog] OK" \
-              || echo "[watchdog] FAILED"
+          TS_ID=$$(docker inspect cn-bittorrent-ts-arr-1 --format "{{.Id}}" 2>/dev/null || true)
+          if [ -n "$$TS_ID" ]; then
+            NEED_RECREATE=""
+            NEED_START=""
+            for dep in $$DEPS; do
+              INFO=$$(docker inspect cn-bittorrent-$$dep-1 --format "{{.HostConfig.NetworkMode}} {{.State.Status}}" 2>/dev/null || true)
+              [ -n "$$INFO" ] || continue
+              DEP_NM=$$(echo "$$INFO" | awk "{print \$$1}")
+              DEP_STATUS=$$(echo "$$INFO" | awk "{print \$$2}")
+              DEP_TARGET=$${DEP_NM#container:}
+              if [ "$$DEP_TARGET" != "$$TS_ID" ]; then
+                NEED_RECREATE="$$NEED_RECREATE $$dep"
+              elif [ "$$DEP_STATUS" != "running" ]; then
+                NEED_START="$$NEED_START $$dep"
+              fi
+            done
+            if [ -n "$$NEED_RECREATE" ]; then
+              echo "[watchdog] netns drift on:$$NEED_RECREATE -- recreating"
+              docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
+                && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
+            fi
+            if [ -n "$$NEED_START" ]; then
+              echo "[watchdog] stopped on:$$NEED_START -- starting"
+              docker compose -p cn-bittorrent start $$NEED_START \
+                && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+            fi
           fi
-          LAST="$$CUR"
           sleep 10
         done
     restart: unless-stopped
