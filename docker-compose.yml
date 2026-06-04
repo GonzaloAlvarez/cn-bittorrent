@@ -502,7 +502,9 @@ services:
       - |
         apk add --no-cache docker-cli-compose >/dev/null
         DEPS="qbittorrent qbittorrent-exporter consul-register promtail node-exporter"
-        echo "[watchdog] ready, polling dependents every 10s ($$DEPS)"
+        ACTION_THRESHOLD=3
+        ACTION_COUNT=0
+        echo "[watchdog] ready, polling dependents every 10s ($$DEPS), drift threshold $$ACTION_THRESHOLD polls"
         while true; do
           TS_ID=$$(docker inspect cn-bittorrent-ts-torrent-1 --format "{{.Id}}" 2>/dev/null || true)
           if [ -n "$$TS_ID" ]; then
@@ -520,15 +522,25 @@ services:
                 NEED_START="$$NEED_START $$dep"
               fi
             done
-            if [ -n "$$NEED_RECREATE" ]; then
-              echo "[watchdog] netns drift on:$$NEED_RECREATE -- recreating"
-              docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
-                && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
-            fi
-            if [ -n "$$NEED_START" ]; then
-              echo "[watchdog] stopped on:$$NEED_START -- starting"
-              docker compose -p cn-bittorrent start $$NEED_START \
-                && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+            if [ -n "$$NEED_RECREATE" ] || [ -n "$$NEED_START" ]; then
+              ACTION_COUNT=$$((ACTION_COUNT + 1))
+              if [ "$$ACTION_COUNT" -ge "$$ACTION_THRESHOLD" ]; then
+                if [ -n "$$NEED_RECREATE" ]; then
+                  echo "[watchdog] persistent drift on:$$NEED_RECREATE -- recreating"
+                  docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
+                    && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
+                fi
+                if [ -n "$$NEED_START" ]; then
+                  echo "[watchdog] persistent stopped on:$$NEED_START -- starting"
+                  docker compose -p cn-bittorrent start $$NEED_START \
+                    && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+                fi
+                ACTION_COUNT=0
+              else
+                echo "[watchdog] action pending (drift:$$NEED_RECREATE start:$$NEED_START count=$$ACTION_COUNT/$$ACTION_THRESHOLD)"
+              fi
+            else
+              ACTION_COUNT=0
             fi
           fi
           sleep 10
@@ -547,7 +559,9 @@ services:
       - |
         apk add --no-cache docker-cli-compose >/dev/null
         DEPS="prowlarr sonarr radarr lidarr readarr flaresolverr sonarr-exporter radarr-exporter prowlarr-exporter lidarr-exporter readarr-exporter consul-register-arr"
-        echo "[watchdog] ready, polling dependents every 10s ($$DEPS)"
+        ACTION_THRESHOLD=3
+        ACTION_COUNT=0
+        echo "[watchdog] ready, polling dependents every 10s ($$DEPS), drift threshold $$ACTION_THRESHOLD polls"
         while true; do
           TS_ID=$$(docker inspect cn-bittorrent-ts-arr-1 --format "{{.Id}}" 2>/dev/null || true)
           if [ -n "$$TS_ID" ]; then
@@ -565,15 +579,25 @@ services:
                 NEED_START="$$NEED_START $$dep"
               fi
             done
-            if [ -n "$$NEED_RECREATE" ]; then
-              echo "[watchdog] netns drift on:$$NEED_RECREATE -- recreating"
-              docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
-                && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
-            fi
-            if [ -n "$$NEED_START" ]; then
-              echo "[watchdog] stopped on:$$NEED_START -- starting"
-              docker compose -p cn-bittorrent start $$NEED_START \
-                && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+            if [ -n "$$NEED_RECREATE" ] || [ -n "$$NEED_START" ]; then
+              ACTION_COUNT=$$((ACTION_COUNT + 1))
+              if [ "$$ACTION_COUNT" -ge "$$ACTION_THRESHOLD" ]; then
+                if [ -n "$$NEED_RECREATE" ]; then
+                  echo "[watchdog] persistent drift on:$$NEED_RECREATE -- recreating"
+                  docker compose -p cn-bittorrent up -d --force-recreate --no-deps $$NEED_RECREATE \
+                    && echo "[watchdog] recreate OK" || echo "[watchdog] recreate FAILED"
+                fi
+                if [ -n "$$NEED_START" ]; then
+                  echo "[watchdog] persistent stopped on:$$NEED_START -- starting"
+                  docker compose -p cn-bittorrent start $$NEED_START \
+                    && echo "[watchdog] start OK" || echo "[watchdog] start FAILED"
+                fi
+                ACTION_COUNT=0
+              else
+                echo "[watchdog] action pending (drift:$$NEED_RECREATE start:$$NEED_START count=$$ACTION_COUNT/$$ACTION_THRESHOLD)"
+              fi
+            else
+              ACTION_COUNT=0
             fi
           fi
           sleep 10
