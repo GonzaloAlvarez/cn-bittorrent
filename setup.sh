@@ -203,20 +203,24 @@ sudo systemctl enable --now docker-compose@cn-bittorrent.service
 # API (LocalHostAuth=false → no creds from 127.0.0.1) so it survives even
 # when qb rewrites its own conf on shutdown.
 echo "[8b/9] configuring qbittorrent download paths"
+# NOTE: qb's LocalHostAuth bypass only covers TRUE localhost inside its netns;
+# a curl from the host's published port hop is NOT 127.0.0.1 to qb and gets a
+# 403. So drive the API via `docker exec` into the qb container.
+QBX="docker exec cn-bittorrent-qbittorrent-1 curl -fsS"
 qb_ready=0
 for i in $(seq 1 30); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:8080/api/v2/app/version" 2>/dev/null; then qb_ready=1; break; fi
+  if $QBX -o /dev/null "http://127.0.0.1:8080/api/v2/app/version" 2>/dev/null; then qb_ready=1; break; fi
   sleep 2
 done
 if [ "$qb_ready" = 1 ]; then
-  curl -fsS -X POST "http://127.0.0.1:8080/api/v2/app/setPreferences" \
+  $QBX -X POST "http://127.0.0.1:8080/api/v2/app/setPreferences" \
     --data-urlencode 'json={"save_path":"/data/torrent/downloads","temp_path_enabled":true,"temp_path":"/data/torrent/incomplete"}' \
     && echo "      save_path=/data/torrent/downloads, temp_path=/data/torrent/incomplete"
   # Point the radarr/sonarr categories at the downloads dir (create-or-edit).
   for cat in movies tv-sonarr radarr; do
-    curl -fsS -X POST "http://127.0.0.1:8080/api/v2/torrents/createCategory" \
+    $QBX -X POST "http://127.0.0.1:8080/api/v2/torrents/editCategory" \
       --data "category=${cat}" --data-urlencode "savePath=/data/torrent/downloads" 2>/dev/null \
-    || curl -fsS -X POST "http://127.0.0.1:8080/api/v2/torrents/editCategory" \
+    || $QBX -X POST "http://127.0.0.1:8080/api/v2/torrents/createCategory" \
       --data "category=${cat}" --data-urlencode "savePath=/data/torrent/downloads" 2>/dev/null || true
   done
   echo "      categories pinned to /data/torrent/downloads"
