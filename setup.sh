@@ -130,14 +130,19 @@ if [ -f "$QBCONF" ]; then
   # subnets so X-Forwarded-For / X-Forwarded-Host are honored.
   qb_set ReverseProxySupportEnabled true
   qb_set TrustedReverseProxiesList  '172.16.0.0/12'
-  # Whitelist just the VPS tailnet IP for unauth access so Glance's
-  # monitor probe from home.lab.gn.al gets 200 instead of 401. qb has
-  # no unauth health endpoint and the tailnet ACL already gates
-  # tag:infra exclusively to the qb UI port, so this doesn't broaden
-  # the attack surface — only the VPS sees an unauth qb.
+  # Whitelist trusted tailnet IPs for unauth access. qb has no unauth
+  # health endpoint and the tailnet ACL already gates qb's UI port to
+  # tag:infra + tag:svc, so this doesn't broaden the real attack surface.
+  #   100.64.0.1/32  = VPS infra-vps for Glance monitor probe (200 not 401).
+  #   100.64.0.21/32 = ts-arr (the *arr suite's shared netns IP). Lets the
+  #     *arr apps reach qb without a password — makes Radarr/Sonarr/Lidarr
+  #     resilient to qb password resets (which have happened on restart).
+  #     NOTE: this does NOT rescue Readarr — it's retired and its qb client
+  #     fails its own qBittorrent 5.x login handshake (expects the old "Ok."
+  #     body; qb 5.x returns 204) before it ever uses the open API, so its
+  #     download client stays non-functional. Left running for storage only.
   qb_set AuthSubnetWhitelistEnabled true
-  # 100.64.0.1/32 = VPS infra-vps for Glance monitor probe.
-  qb_set AuthSubnetWhitelist        '100.64.0.1/32'
+  qb_set AuthSubnetWhitelist        '100.64.0.1/32,100.64.0.21/32'
   # Bypass auth for 127.0.0.1 so the qbittorrent-exporter sidecar
   # (running in the same netns) can read /api/v2/* without credentials.
   # qb's LocalHostAuth=false is the documented localhost-bypass flag —
