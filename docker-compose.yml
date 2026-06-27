@@ -32,8 +32,7 @@ services:
         # Assert it's REALLY the NFS share, not the empty local placeholder dir.
         # (A failed mount leaves a root-owned /torrent placeholder that satisfies
         #  the checks below but silently breaks qb writes + Radarr imports.)
-        fstype="$(stat -f -c %T /nfs-check)"
-        test "$fstype" = nfs || { echo "FAIL: /nfs-check is '$fstype', not nfs — refusing to start on placeholder"; exit 1; }
+        test "$(stat -f -c %T /nfs-check)" = nfs || { echo "FAIL: /nfs-check is not nfs ($(stat -f -c %T /nfs-check)) — refusing to start on placeholder"; exit 1; }
         test -d /nfs-check/torrent/movies || { echo "FAIL: torrent/movies missing on NFS"; exit 1; }
         echo "NFS OK ($(df -h /nfs-check | tail -1 | awk '{print $4}') free)"
     volumes:
