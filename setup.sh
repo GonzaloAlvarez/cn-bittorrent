@@ -196,6 +196,64 @@ fi
 echo "[8/9] enabling + starting docker-compose@cn-bittorrent"
 sudo systemctl enable --now docker-compose@cn-bittorrent.service
 
+# ─── 8b. configure qbittorrent save/temp paths via WebUI API ─────────
+# qb must save completed downloads under the SAME NFS subtree the *arr
+# suite imports from, at the IDENTICAL container path (/data/torrent), so
+# Radarr/Sonarr hardlink-import without a RemotePathMapping. Done over the
+# API (LocalHostAuth=false → no creds from 127.0.0.1) so it survives even
+# when qb rewrites its own conf on shutdown.
+echo "[8b/9] configuring qbittorrent download paths"
+qb_ready=0
+for i in $(seq 1 30); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:8080/api/v2/app/version" 2>/dev/null; then qb_ready=1; break; fi
+  sleep 2
+done
+if [ "$qb_ready" = 1 ]; then
+  curl -fsS -X POST "http://127.0.0.1:8080/api/v2/app/setPreferences" \
+    --data-urlencode 'json={"save_path":"/data/torrent/downloads","temp_path_enabled":true,"temp_path":"/data/torrent/incomplete"}' \
+    && echo "      save_path=/data/torrent/downloads, temp_path=/data/torrent/incomplete"
+  # Point the radarr/sonarr categories at the downloads dir (create-or-edit).
+  for cat in movies tv-sonarr radarr; do
+    curl -fsS -X POST "http://127.0.0.1:8080/api/v2/torrents/createCategory" \
+      --data "category=${cat}" --data-urlencode "savePath=/data/torrent/downloads" 2>/dev/null \
+    || curl -fsS -X POST "http://127.0.0.1:8080/api/v2/torrents/editCategory" \
+      --data "category=${cat}" --data-urlencode "savePath=/data/torrent/downloads" 2>/dev/null || true
+  done
+  echo "      categories pinned to /data/torrent/downloads"
+else
+  echo "      qb WebUI not reachable yet — re-run setup.sh once qb is up"
+fi
+
+# ─── 8c. normalize Prowlarr application URLs to 127.0.0.1 ─────────────
+# All *arr apps share ts-arr's netns, so Prowlarr must reach them on
+# localhost with NO UrlBase path prefix. Legacy configs carried stale
+# docker-DNS hostnames (radarr:7878/radarr, readerr:8787, …) that don't
+# resolve here → "applications unavailable". Rewrite baseUrl + prowlarrUrl.
+echo "[8c/9] normalizing Prowlarr application URLs"
+PK=$(grep -oE '<ApiKey>[a-f0-9]{32}</ApiKey>' "$REPO_DIR/prowlarr/config.xml" 2>/dev/null | sed 's/<[^>]*>//g' | head -1)
+if [ -n "$PK" ] && command -v python3 >/dev/null 2>&1 && curl -fsS -o /dev/null -H "X-Api-Key: $PK" "http://127.0.0.1:9696/api/v1/health" 2>/dev/null; then
+  python3 - "$PK" <<'PY'
+import json,sys,urllib.request
+key=sys.argv[1]; base="http://127.0.0.1:9696/api/v1"
+ports={"Radarr":7878,"Sonarr":8989,"Lidarr":8686,"Readarr":8787}
+def req(path,method="GET",data=None):
+    r=urllib.request.Request(base+path,data=json.dumps(data).encode() if data else None,
+        headers={"X-Api-Key":key,"Content-Type":"application/json"},method=method)
+    return urllib.request.urlopen(r,timeout=15)
+apps=json.load(req("/applications"))
+for a in apps:
+    impl=a.get("implementationName") or a.get("name")
+    port=ports.get(impl)
+    if not port: continue
+    for f in a["fields"]:
+        if f["name"]=="baseUrl": f["value"]=f"http://127.0.0.1:{port}"
+        if f["name"]=="prowlarrUrl": f["value"]="http://127.0.0.1:9696"
+    req(f"/applications/{a['id']}","PUT",a); print(f"      {impl}: baseUrl -> http://127.0.0.1:{port}")
+PY
+else
+  echo "      skipped (no api key / python3 / prowlarr not up)"
+fi
+
 # ─── 9. status ───────────────────────────────────────────────────────
 echo "[9/9] status:"
 sudo systemctl status docker-compose@cn-bittorrent.service --no-pager -l | head -15

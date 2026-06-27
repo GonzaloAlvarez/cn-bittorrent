@@ -4,6 +4,12 @@ Description=cn-bittorrent docker compose stack (mullvad-egress torrent core)
 Requires=docker.service home-gonzalo-docker-data-nfs.mount
 After=docker.service home-gonzalo-docker-data-nfs.mount network-online.target
 RequiresMountsFor=/home/gonzalo/docker/data/nfs
+# BindsTo: if the NFS mount unit ever FAILS (e.g. mount timeout, as happened
+# 2026-06-22), tear the stack down instead of leaving it running bound to the
+# empty local placeholder dir — which silently breaks qb writes + Radarr
+# imports. `hard,_netdev` means a transient server blip doesn't change the
+# .mount state (I/O just blocks), so this won't flap on momentary outages.
+BindsTo=home-gonzalo-docker-data-nfs.mount
 Wants=network-online.target
 
 [Service]
@@ -19,7 +25,10 @@ Environment="PWD=/home/gonzalo/cn-bittorrent"
 # Belt-and-suspenders pre-checks: bail BEFORE docker compose ever sees
 # the bind sources if the mount or the torrent/ subtree is missing.
 ExecStartPre=/usr/bin/mountpoint -q /home/gonzalo/docker/data/nfs
-ExecStartPre=/usr/bin/test -d /home/gonzalo/docker/data/nfs/torrent
+# Assert it's REALLY nfs, not the empty local placeholder that a failed
+# mount leaves behind (mount-precheck does the same inside the netns).
+ExecStartPre=/bin/sh -c '[ "$(stat -f -c %%T /home/gonzalo/docker/data/nfs)" = nfs ]'
+ExecStartPre=/usr/bin/test -d /home/gonzalo/docker/data/nfs/torrent/movies
 ExecStart=/usr/bin/docker compose -p cn-bittorrent up -d --remove-orphans
 ExecStop=/usr/bin/docker compose -p cn-bittorrent down
 

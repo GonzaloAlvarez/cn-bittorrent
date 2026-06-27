@@ -6,8 +6,11 @@
 # Volume layout preserves the LEGACY bind paths so migrated *arr/qb
 # configs (rsync'd from ~/docker/docker-compose-nas) don't need
 # database surgery:
-#   /home/gonzalo/docker/data/nfs/torrent  →  /data/torrent   (*arr)
-#   /home/gonzalo/docker/data/nfs/torrent  →  /data/torrents  (qbittorrent)
+#   /home/gonzalo/docker/data/nfs/torrent  →  /data/torrent   (*arr AND qbittorrent)
+# qb and the *arr suite share the IDENTICAL container path so completed
+# downloads import via atomic hardlink (same NFS filesystem) and Radarr's
+# RemotePathMappingCheck stays clean. qb saves under /data/torrent/downloads,
+# Radarr's library root is /data/torrent/movies.
 #
 # Operate via systemd, not `docker compose` directly:
 #   sudo systemctl {start,stop,restart} docker-compose@cn-bittorrent
@@ -26,7 +29,12 @@ services:
       - |
         set -e
         mountpoint -q /nfs-check || { echo "FAIL: NFS not mounted at /home/gonzalo/docker/data/nfs"; exit 1; }
-        test -d /nfs-check/torrent || { echo "FAIL: torrent subtree missing on NFS"; exit 1; }
+        # Assert it's REALLY the NFS share, not the empty local placeholder dir.
+        # (A failed mount leaves a root-owned /torrent placeholder that satisfies
+        #  the checks below but silently breaks qb writes + Radarr imports.)
+        fstype="$(stat -f -c %T /nfs-check)"
+        test "$fstype" = nfs || { echo "FAIL: /nfs-check is '$fstype', not nfs — refusing to start on placeholder"; exit 1; }
+        test -d /nfs-check/torrent/movies || { echo "FAIL: torrent/movies missing on NFS"; exit 1; }
         echo "NFS OK ($(df -h /nfs-check | tail -1 | awk '{print $4}') free)"
     volumes:
       - /home/gonzalo/docker/data/nfs:/nfs-check:ro
@@ -122,6 +130,7 @@ services:
       - "127.0.0.1:9696:9696"   # prowlarr  → prowlarr.kaiser.lan
       - "127.0.0.1:8686:8686"   # lidarr    → lidarr.kaiser.lan
       - "127.0.0.1:8787:8787"   # readarr   → readarr.kaiser.lan
+      - "127.0.0.1:8191:8191"   # flaresolverr → flaresolverr.kaiser.lan (status-only health probe)
     depends_on:
       mount-precheck:
         condition: service_completed_successfully
@@ -143,7 +152,7 @@ services:
       - WEBUI_PORT=8080
     volumes:
       - ./qbittorrent:/config
-      - /home/gonzalo/docker/data/nfs/torrent:/data/torrents
+      - /home/gonzalo/docker/data/nfs/torrent:/data/torrent
     depends_on:
       ts-torrent:
         condition: service_healthy
