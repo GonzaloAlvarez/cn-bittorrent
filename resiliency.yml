@@ -3,6 +3,9 @@
 boot:
   enabled: true
   nfs_mount: /home/gonzalo/docker/data/nfs
+  binds_to_mount: true
+  require_paths:
+    - /home/gonzalo/docker/data/nfs/torrent/movies
 reconcile:
   enabled: true
   schedule: "*/5 * * * *"
