@@ -508,7 +508,7 @@ services:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache docker-cli-compose >/dev/null
+        until apk add --no-cache docker-cli-compose >/dev/null 2>&1; do echo "[watchdog] waiting for network to install docker-cli-compose"; sleep 5; done
         DEPS="qbittorrent qbittorrent-exporter consul-register promtail node-exporter"
         ACTION_THRESHOLD=3
         ACTION_COUNT=0
@@ -565,7 +565,7 @@ services:
       - /bin/sh
       - -c
       - |
-        apk add --no-cache docker-cli-compose >/dev/null
+        until apk add --no-cache docker-cli-compose >/dev/null 2>&1; do echo "[watchdog] waiting for network to install docker-cli-compose"; sleep 5; done
         DEPS="prowlarr sonarr radarr lidarr readarr flaresolverr sonarr-exporter radarr-exporter prowlarr-exporter lidarr-exporter readarr-exporter consul-register-arr"
         ACTION_THRESHOLD=3
         ACTION_COUNT=0
